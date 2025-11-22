@@ -2,7 +2,25 @@ import { HierarchyRepository, Hierarchy } from '../database/repositories/Hierarc
 import { AgentRepository } from '../database/repositories/AgentRepository.js';
 import { config } from '../config/env.js';
 import { logger } from '../utils/Logger.js';
+import { query } from '../database/db.js';
 import type { Agent } from '../models/Agent.js';
+
+/**
+ * Hierarchy Node for tree representation
+ * Represents a single node in the agent hierarchy tree
+ */
+export interface HierarchyNode {
+  id: string;
+  role: string;
+  status: string;
+  depth_level: number;
+  parent_id: string | null;
+  task_description: string;
+  created_at: Date;
+  updated_at: Date;
+  completed_at: Date | null;
+  children: HierarchyNode[];
+}
 
 /**
  * Hierarchy Service
@@ -299,22 +317,137 @@ export class HierarchyService {
   /**
    * Get the complete hierarchy tree starting from a root agent
    *
+   * Uses recursive CTE to query the hierarchy and builds a nested tree structure.
+   * Each node contains agent details and an array of child nodes.
+   *
    * @param root_id - Root agent UUID
-   * @returns Hierarchy tree structure
+   * @param options - Optional query parameters
+   * @param options.maxDepth - Maximum depth to traverse (default: unlimited)
+   * @returns Nested hierarchy tree with HierarchyNode structure
    */
-  async getHierarchyTree(root_id: string): Promise<any> {
-    try {
-      const tree = await this.hierarchyRepo.getHierarchyTree(root_id);
+  async getHierarchyTree(
+    root_id: string,
+    options?: {
+      maxDepth?: number;
+    }
+  ): Promise<HierarchyNode> {
+    const { maxDepth } = options || {};
 
-      this.serviceLogger.debug(
-        { root_id, nodes: tree.length },
-        'Retrieved hierarchy tree'
+    this.serviceLogger.info(
+      { root_id, maxDepth },
+      'Building hierarchy tree'
+    );
+
+    try {
+      // 1. Build recursive CTE query to get all nodes in the tree
+      const params: any[] = [root_id];
+      let paramIndex = 2;
+
+      // Add max depth condition if specified
+      const depthCondition = maxDepth !== undefined
+        ? ` AND t.tree_depth < $${paramIndex++}`
+        : '';
+
+      if (maxDepth !== undefined) {
+        params.push(maxDepth);
+      }
+
+      const treeQuery = `
+        WITH RECURSIVE tree AS (
+          -- Base case: root agent
+          SELECT
+            a.id,
+            a.role,
+            a.status,
+            a.depth_level,
+            a.parent_id,
+            a.task_description,
+            a.created_at,
+            a.updated_at,
+            a.completed_at,
+            0 as tree_depth
+          FROM agents a
+          WHERE a.id = $1
+
+          UNION ALL
+
+          -- Recursive case: children via hierarchy table
+          SELECT
+            a.id,
+            a.role,
+            a.status,
+            a.depth_level,
+            a.parent_id,
+            a.task_description,
+            a.created_at,
+            a.updated_at,
+            a.completed_at,
+            t.tree_depth + 1
+          FROM agents a
+          INNER JOIN hierarchies h ON a.id = h.child_id
+          INNER JOIN tree t ON h.parent_id = t.id
+          WHERE 1=1${depthCondition}
+        )
+        SELECT * FROM tree ORDER BY tree_depth, created_at
+      `;
+
+      const result = await query<Agent & { tree_depth: number }>(treeQuery, params);
+
+      if (result.rows.length === 0) {
+        throw new Error(`Root agent not found: ${root_id}`);
+      }
+
+      // 2. Build nested tree structure from flat results
+      const nodesMap = new Map<string, HierarchyNode>();
+
+      // First pass: Create all nodes
+      result.rows.forEach(row => {
+        nodesMap.set(row.id, {
+          id: row.id,
+          role: row.role,
+          status: row.status,
+          depth_level: row.depth_level,
+          parent_id: row.parent_id,
+          task_description: row.task_description,
+          created_at: new Date(row.created_at),
+          updated_at: new Date(row.updated_at),
+          completed_at: row.completed_at ? new Date(row.completed_at) : null,
+          children: [],
+        });
+      });
+
+      // Second pass: Build parent-child relationships
+      result.rows.forEach(row => {
+        if (row.parent_id) {
+          const parentNode = nodesMap.get(row.parent_id);
+          const childNode = nodesMap.get(row.id);
+
+          if (parentNode && childNode) {
+            parentNode.children.push(childNode);
+          }
+        }
+      });
+
+      // 3. Return the root node (which now contains entire tree)
+      const rootNode = nodesMap.get(root_id);
+
+      if (!rootNode) {
+        throw new Error(`Failed to build tree: root node not found`);
+      }
+
+      this.serviceLogger.info(
+        {
+          root_id,
+          totalNodes: nodesMap.size,
+          maxDepthReached: Math.max(...Array.from(nodesMap.values()).map(n => n.depth_level)),
+        },
+        'Hierarchy tree built successfully'
       );
 
-      return tree;
+      return rootNode;
     } catch (error) {
       this.serviceLogger.error(
-        { error, root_id },
+        { error, root_id, maxDepth },
         'Failed to get hierarchy tree'
       );
       throw error;
