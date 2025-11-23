@@ -315,6 +315,92 @@ export class HierarchyService {
   }
 
   /**
+   * Get all ancestor agents with full details using recursive query
+   *
+   * Returns ancestors ordered from root (furthest) to immediate parent (closest).
+   * Uses recursive CTE to walk up the hierarchy tree through the hierarchies table.
+   *
+   * @param agent_id - Agent UUID
+   * @returns Array of ancestor agents ordered from root to parent
+   */
+  async getAncestorAgents(agent_id: string): Promise<Agent[]> {
+    this.serviceLogger.debug({ agent_id }, 'Retrieving ancestor agents with details');
+
+    try {
+      // Check if agent exists
+      const agent = await this.agentRepo.findById(agent_id);
+      if (!agent) {
+        throw new Error(`Agent not found: ${agent_id}`);
+      }
+
+      // If agent has no parent, return empty array
+      if (!agent.parent_id) {
+        this.serviceLogger.debug({ agent_id }, 'Agent is root - no ancestors');
+        return [];
+      }
+
+      // Recursive CTE to walk up the hierarchy
+      const ancestorQuery = `
+        WITH RECURSIVE ancestors AS (
+          -- Base case: immediate parent
+          SELECT
+            h.parent_id,
+            1 as level
+          FROM hierarchies h
+          WHERE h.child_id = $1
+
+          UNION ALL
+
+          -- Recursive case: parents of parents
+          SELECT
+            h.parent_id,
+            a.level + 1
+          FROM hierarchies h
+          INNER JOIN ancestors a ON h.child_id = a.parent_id
+        )
+        SELECT
+          ag.*,
+          anc.level
+        FROM agents ag
+        INNER JOIN ancestors anc ON ag.id = anc.parent_id
+        ORDER BY anc.level DESC
+      `;
+
+      const result = await query<Agent & { level: number }>(ancestorQuery, [agent_id]);
+
+      const ancestors = result.rows.map(row => ({
+        id: row.id,
+        role: row.role,
+        status: row.status,
+        depth_level: row.depth_level,
+        parent_id: row.parent_id,
+        task_description: row.task_description,
+        created_at: new Date(row.created_at),
+        updated_at: new Date(row.updated_at),
+        completed_at: row.completed_at ? new Date(row.completed_at) : null,
+      }));
+
+      this.serviceLogger.info(
+        {
+          agent_id,
+          ancestorCount: ancestors.length,
+          rootAgent: ancestors[0]?.id,
+          immediateParent: ancestors[ancestors.length - 1]?.id,
+        },
+        'Retrieved ancestor agents'
+      );
+
+      return ancestors;
+    } catch (error) {
+      this.serviceLogger.error(
+        { error, agent_id },
+        'Failed to get ancestor agents'
+      );
+      throw error;
+    }
+  }
+
+  /**
    * Get the complete hierarchy tree starting from a root agent
    *
    * Uses recursive CTE to query the hierarchy and builds a nested tree structure.
