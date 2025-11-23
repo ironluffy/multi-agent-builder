@@ -384,4 +384,205 @@ describe('US2: Hierarchical Teams', () => {
       expect(siblings).not.toContain(child1Id);
     });
   });
+
+  describe('Budget Reclamation on Child Completion', () => {
+    it('should reclaim unused budget when child completes (SC-004)', async () => {
+      // Create parent with 10,000 tokens
+      const parentId = await agentService.spawnAgent('parent', 'Parent agent', 10000);
+      const parentWrapper = await Agent.load(parentId);
+
+      // Spawn child with 3,000 tokens
+      const childId = await parentWrapper.spawnSubordinate('child', 'Child task', 3000);
+
+      // Verify parent budget after spawning child
+      const parentBudgetAfterSpawn = await budgetService.getBudget(parentId);
+      expect(parentBudgetAfterSpawn!.allocated).toBe(10000);
+      expect(parentBudgetAfterSpawn!.reserved).toBe(3000);
+      expect(parentBudgetAfterSpawn!.used).toBe(0);
+
+      // Simulate child consuming 800 tokens
+      const childBudget = await budgetService.getBudget(childId);
+      await budgetService.consumeTokens(childId, 800);
+
+      // Verify child budget after consumption
+      const childBudgetAfterUse = await budgetService.getBudget(childId);
+      expect(childBudgetAfterUse!.allocated).toBe(3000);
+      expect(childBudgetAfterUse!.used).toBe(800);
+      expect(childBudgetAfterUse!.reserved).toBe(0);
+
+      // Mark child as completed
+      await agentService.updateAgentStatus(childId, 'completed');
+
+      // Verify child status
+      const childAgent = await agentService.getAgentStatus(childId);
+      expect(childAgent.status).toBe('completed');
+
+      // Verify budget reclamation via database trigger
+      // Trigger should: reserved = reserved - child.allocated + child.used
+      // Expected: 3000 - 3000 + 800 = 800
+      const parentBudgetAfterCompletion = await budgetService.getBudget(parentId);
+
+      expect(parentBudgetAfterCompletion!.allocated).toBe(10000);
+      expect(parentBudgetAfterCompletion!.reserved).toBe(800);
+      expect(parentBudgetAfterCompletion!.used).toBe(0);
+
+      // Calculate reclaimed budget
+      const reclaimedBudget = 3000 - 800; // allocated - used = 2200
+      const parentAvailableAfter = await budgetService.getRemainingBudget(parentId);
+
+      // Parent available = allocated - used - reserved
+      // = 10000 - 0 - 800 = 9200
+      expect(parentAvailableAfter).toBe(9200);
+    });
+
+    it('should handle child failure and reclaim budget correctly', async () => {
+      // Create hierarchy
+      const parentId = await agentService.spawnAgent('parent', 'Parent', 10000);
+      const parentWrapper = await Agent.load(parentId);
+
+      const childId = await parentWrapper.spawnSubordinate('child', 'Child', 2000);
+
+      // Child consumes 500 tokens then fails
+      await budgetService.consumeTokens(childId, 500);
+      await agentService.updateAgentStatus(childId, 'failed');
+
+      // Verify budget reclamation
+      const parentBudget = await budgetService.getBudget(parentId);
+
+      // Parent reserved should be updated to reflect child's actual usage
+      // reserved = reserved - child.allocated + child.used
+      // = 2000 - 2000 + 500 = 500
+      expect(parentBudget!.reserved).toBe(500);
+
+      // Available = allocated - used - reserved = 10000 - 0 - 500 = 9500
+      const available = await budgetService.getRemainingBudget(parentId);
+      expect(available).toBe(9500);
+    });
+
+    it('should handle child termination and reclaim budget correctly', async () => {
+      // Create hierarchy
+      const parentId = await agentService.spawnAgent('parent', 'Parent', 10000);
+      const parentWrapper = await Agent.load(parentId);
+
+      const childId = await parentWrapper.spawnSubordinate('child', 'Child', 3000);
+
+      // Child consumes 1200 tokens then is terminated
+      await budgetService.consumeTokens(childId, 1200);
+      await agentService.updateAgentStatus(childId, 'terminated');
+
+      // Verify budget reclamation
+      const parentBudget = await budgetService.getBudget(parentId);
+
+      // reserved = reserved - child.allocated + child.used
+      // = 3000 - 3000 + 1200 = 1200
+      expect(parentBudget!.reserved).toBe(1200);
+
+      const available = await budgetService.getRemainingBudget(parentId);
+      expect(available).toBe(8800); // 10000 - 0 - 1200
+    });
+
+    it('should handle multiple children completing at different times', async () => {
+      // Create parent with 10,000 tokens
+      const parentId = await agentService.spawnAgent('parent', 'Parent', 10000);
+      const parentWrapper = await Agent.load(parentId);
+
+      // Spawn 3 children
+      const child1Id = await parentWrapper.spawnSubordinate('child1', 'Child 1', 2000);
+      const child2Id = await parentWrapper.spawnSubordinate('child2', 'Child 2', 2000);
+      const child3Id = await parentWrapper.spawnSubordinate('child3', 'Child 3', 2000);
+
+      // Parent should have 6000 reserved
+      let parentBudget = await budgetService.getBudget(parentId);
+      expect(parentBudget!.reserved).toBe(6000);
+
+      // Child 1 uses 500 tokens and completes
+      await budgetService.consumeTokens(child1Id, 500);
+      await agentService.updateAgentStatus(child1Id, 'completed');
+
+      // Parent reserved: 6000 - 2000 + 500 = 4500
+      parentBudget = await budgetService.getBudget(parentId);
+      expect(parentBudget!.reserved).toBe(4500);
+
+      // Child 2 uses 1800 tokens and completes
+      await budgetService.consumeTokens(child2Id, 1800);
+      await agentService.updateAgentStatus(child2Id, 'completed');
+
+      // Parent reserved: 4500 - 2000 + 1800 = 4300
+      parentBudget = await budgetService.getBudget(parentId);
+      expect(parentBudget!.reserved).toBe(4300);
+
+      // Child 3 uses all 2000 tokens and completes
+      await budgetService.consumeTokens(child3Id, 2000);
+      await agentService.updateAgentStatus(child3Id, 'completed');
+
+      // Parent reserved: 4300 - 2000 + 2000 = 4300
+      parentBudget = await budgetService.getBudget(parentId);
+      expect(parentBudget!.reserved).toBe(4300);
+
+      // Total tokens used by children: 500 + 1800 + 2000 = 4300
+      // Parent available: 10000 - 0 - 4300 = 5700
+      const available = await budgetService.getRemainingBudget(parentId);
+      expect(available).toBe(5700);
+    });
+
+    it('should validate SC-004: 100% budget accuracy across hierarchy', async () => {
+      // Create 3-level hierarchy to test cascading budget accuracy
+      const rootId = await agentService.spawnAgent('root', 'Root', 20000);
+      const rootWrapper = await Agent.load(rootId);
+
+      // Root spawns 2 children
+      const child1Id = await rootWrapper.spawnSubordinate('child1', 'Child 1', 8000);
+      const child2Id = await rootWrapper.spawnSubordinate('child2', 'Child 2', 6000);
+
+      // Children spawn grandchildren
+      const child1Wrapper = await Agent.load(child1Id);
+      const gc1Id = await child1Wrapper.spawnSubordinate('gc1', 'GC1', 3000);
+      const gc2Id = await child1Wrapper.spawnSubordinate('gc2', 'GC2', 2000);
+
+      // Simulate token consumption
+      await budgetService.consumeTokens(gc1Id, 1500); // Uses 1500/3000
+      await budgetService.consumeTokens(gc2Id, 2000); // Uses 2000/2000 (all)
+      await budgetService.consumeTokens(child1Id, 1000); // Direct usage
+      await budgetService.consumeTokens(child2Id, 4000); // Uses 4000/6000
+
+      // Complete grandchildren
+      await agentService.updateAgentStatus(gc1Id, 'completed');
+      await agentService.updateAgentStatus(gc2Id, 'completed');
+
+      // Verify child1 budget after grandchildren complete
+      const child1Budget = await budgetService.getBudget(child1Id);
+      // reserved = (3000 - 3000 + 1500) + (2000 - 2000 + 2000) = 1500 + 2000 = 3500
+      expect(child1Budget!.reserved).toBe(3500);
+      expect(child1Budget!.used).toBe(1000);
+      // available = 8000 - 1000 - 3500 = 3500
+      const child1Available = await budgetService.getRemainingBudget(child1Id);
+      expect(child1Available).toBe(3500);
+
+      // Complete children
+      await agentService.updateAgentStatus(child1Id, 'completed');
+      await agentService.updateAgentStatus(child2Id, 'completed');
+
+      // Verify root budget after all children complete
+      const rootBudget = await budgetService.getBudget(rootId);
+
+      // Total actual usage:
+      // - child1: 1000 (direct) + 1500 (gc1) + 2000 (gc2) = 4500
+      // - child2: 4000 (direct)
+      // Total: 8500 tokens
+
+      // Root reserved should reflect actual usage:
+      // reserved = (8000 - 8000 + 4500) + (6000 - 6000 + 4000) = 4500 + 4000 = 8500
+      expect(rootBudget!.reserved).toBe(8500);
+      expect(rootBudget!.used).toBe(0);
+
+      // Root available = 20000 - 0 - 8500 = 11500
+      const rootAvailable = await budgetService.getRemainingBudget(rootId);
+      expect(rootAvailable).toBe(11500);
+
+      // Validate 100% accuracy: allocated = used + reserved + available
+      const totalAccountedFor = rootBudget!.used + rootBudget!.reserved + rootAvailable;
+      expect(totalAccountedFor).toBe(rootBudget!.allocated);
+      expect(totalAccountedFor).toBe(20000);
+    });
+  });
 });
