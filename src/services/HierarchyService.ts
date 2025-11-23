@@ -290,6 +290,112 @@ export class HierarchyService {
   }
 
   /**
+   * Get all descendant agents with full details using recursive query
+   *
+   * Returns descendants ordered breadth-first (by level, then creation time).
+   * Uses recursive CTE to walk down the hierarchy tree through the hierarchies table.
+   *
+   * @param agent_id - Agent UUID
+   * @param options - Optional query parameters
+   * @param options.maxDepth - Maximum depth to traverse from this agent
+   * @returns Array of descendant agents in breadth-first order
+   */
+  async getDescendantAgents(
+    agent_id: string,
+    options?: {
+      maxDepth?: number;
+    }
+  ): Promise<Agent[]> {
+    const { maxDepth } = options || {};
+
+    this.serviceLogger.debug(
+      { agent_id, maxDepth },
+      'Retrieving descendant agents with details'
+    );
+
+    try {
+      // Check if agent exists
+      const agent = await this.agentRepo.findById(agent_id);
+      if (!agent) {
+        throw new Error(`Agent not found: ${agent_id}`);
+      }
+
+      // Build recursive CTE query to walk down the hierarchy
+      const params: any[] = [agent_id];
+      let paramIndex = 2;
+
+      // Add max depth condition if specified
+      const depthCondition = maxDepth !== undefined
+        ? ` AND d.level < $${paramIndex++}`
+        : '';
+
+      if (maxDepth !== undefined) {
+        params.push(maxDepth);
+      }
+
+      const descendantQuery = `
+        WITH RECURSIVE descendants AS (
+          -- Base case: direct children
+          SELECT
+            h.child_id,
+            1 as level
+          FROM hierarchies h
+          WHERE h.parent_id = $1
+
+          UNION ALL
+
+          -- Recursive case: children of children
+          SELECT
+            h.child_id,
+            d.level + 1
+          FROM hierarchies h
+          INNER JOIN descendants d ON h.parent_id = d.child_id
+          WHERE 1=1${depthCondition}
+        )
+        SELECT
+          ag.*,
+          desc.level
+        FROM agents ag
+        INNER JOIN descendants desc ON ag.id = desc.child_id
+        ORDER BY desc.level ASC, ag.created_at ASC
+      `;
+
+      const result = await query<Agent & { level: number }>(descendantQuery, params);
+
+      const descendants = result.rows.map(row => ({
+        id: row.id,
+        role: row.role,
+        status: row.status,
+        depth_level: row.depth_level,
+        parent_id: row.parent_id,
+        task_description: row.task_description,
+        created_at: new Date(row.created_at),
+        updated_at: new Date(row.updated_at),
+        completed_at: row.completed_at ? new Date(row.completed_at) : null,
+      }));
+
+      this.serviceLogger.info(
+        {
+          agent_id,
+          descendantCount: descendants.length,
+          maxLevelReached: descendants.length > 0
+            ? Math.max(...result.rows.map(r => r.level))
+            : 0,
+        },
+        'Retrieved descendant agents'
+      );
+
+      return descendants;
+    } catch (error) {
+      this.serviceLogger.error(
+        { error, agent_id, maxDepth },
+        'Failed to get descendant agents'
+      );
+      throw error;
+    }
+  }
+
+  /**
    * Get all ancestors (parent, grandparent, etc.) of an agent
    *
    * @param agent_id - Agent UUID
