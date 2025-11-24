@@ -184,6 +184,15 @@ export class WorkflowRepository {
   }
 
   /**
+   * Find workflow node by agent ID
+   */
+  async findNodeByAgentId(agentId: string): Promise<WorkflowNode | null> {
+    const query = 'SELECT * FROM workflow_nodes WHERE agent_id = $1';
+    const result = await db.query<WorkflowNode>(query, [agentId]);
+    return result.rows[0] || null;
+  }
+
+  /**
    * Find all nodes for a workflow graph
    */
   async findNodesByGraphId(graphId: string): Promise<WorkflowNode[]> {

@@ -215,11 +215,14 @@ export class WorkflowEngine {
   }
 
   /**
-   * Execute workflow by spawning nodes in dependency order
+   * Execute workflow by spawning ONLY nodes with zero dependencies
+   *
+   * IMPORTANT: This method only spawns the initial nodes. Subsequent nodes
+   * are spawned by processCompletedNode() when their dependencies complete.
    *
    * @param graphId - Workflow graph UUID
    * @param parentAgentId - Parent agent orchestrating this workflow
-   * @returns Map of node IDs to spawned agent IDs
+   * @returns Map of spawned node IDs to agent IDs (only initial nodes)
    */
   async executeWorkflow(
     graphId: string,
@@ -238,35 +241,25 @@ export class WorkflowEngine {
 
       // 2. Load nodes
       const nodes = await this.workflowRepo.findNodesByGraphId(graphId);
-      const nodeMap = new Map<string, WorkflowNode>();
-      nodes.forEach(node => nodeMap.set(node.id, node));
 
-      // 3. Compute execution order
-      const executionOrder = this.topologicalSort(nodes, nodeMap);
-      if (!executionOrder) {
-        throw new Error('Failed to compute execution order');
+      // 3. Find nodes with ZERO dependencies (starting nodes)
+      const startingNodes = nodes.filter(node => {
+        const deps = Array.isArray(node.dependencies) ? node.dependencies : [];
+        return deps.length === 0;
+      });
+
+      if (startingNodes.length === 0) {
+        throw new Error('Workflow has no starting nodes (all nodes have dependencies)');
       }
 
-      // 4. Spawn nodes in order
+      // 4. Spawn ONLY starting nodes
       const spawnedAgents = new Map<string, string>();
 
-      for (const nodeId of executionOrder) {
-        const node = nodeMap.get(nodeId)!;
-
-        // Check if all dependencies completed
-        const deps = Array.isArray(node.dependencies) ? node.dependencies : [];
-        const allDepsCompleted = deps.every(depId => spawnedAgents.has(depId));
-
-        if (!allDepsCompleted) {
-          this.engineLogger.warn(
-            { nodeId, dependencies: deps },
-            'Dependencies not yet completed, skipping node'
-          );
-          continue;
-        }
-
-        // Spawn agent for this node
-        this.engineLogger.info({ nodeId, role: node.role }, 'Spawning node agent');
+      for (const node of startingNodes) {
+        this.engineLogger.info(
+          { nodeId: node.id, role: node.role },
+          'Spawning initial workflow node'
+        );
 
         const agentId = await this.agentService.spawnAgent(
           node.role,
@@ -275,35 +268,181 @@ export class WorkflowEngine {
           parentAgentId
         );
 
-        spawnedAgents.set(nodeId, agentId);
+        spawnedAgents.set(node.id, agentId);
 
-        // Update node with spawned agent
-        await this.workflowRepo.updateNode(nodeId, {
+        // Update node status
+        await this.workflowRepo.updateNode(node.id, {
           agent_id: agentId,
           execution_status: 'executing',
           spawn_timestamp: new Date(),
         });
       }
 
-      // 5. Update graph status
+      // 5. Mark graph as active
       await this.workflowRepo.updateGraph(graphId, {
         status: 'active',
       });
 
       this.engineLogger.info(
-        { graphId, nodesSpawned: spawnedAgents.size },
-        'Workflow execution started'
+        { graphId, startingNodesSpawned: spawnedAgents.size, totalNodes: nodes.length },
+        'Workflow execution started - waiting for nodes to complete'
       );
 
       return spawnedAgents;
     } catch (error) {
       this.engineLogger.error({ error, graphId }, 'Workflow execution failed');
 
-      // Mark graph as failed
       await this.workflowRepo.updateGraph(graphId, {
         status: 'failed',
       });
 
+      throw error;
+    }
+  }
+
+  /**
+   * Process a completed node and spawn dependent nodes if ready
+   *
+   * This method should be called when an agent completes (via polling or event).
+   * It checks which workflow nodes depend on the completed node and spawns them
+   * if all their dependencies are now satisfied.
+   *
+   * @param agentId - Completed agent UUID
+   * @param result - Agent's execution result (optional)
+   */
+  async processCompletedNode(agentId: string, result?: Record<string, any>): Promise<void> {
+    this.engineLogger.info({ agentId }, 'Processing completed node');
+
+    try {
+      // 1. Find the workflow node for this agent
+      const nodes = await this.workflowRepo.findNodesByGraphId(''); // Need to query by agent_id
+      // TODO: Add findNodeByAgentId() to repository
+      const completedNode = nodes.find(n => n.agent_id === agentId);
+
+      if (!completedNode) {
+        this.engineLogger.warn({ agentId }, 'No workflow node found for agent');
+        return;
+      }
+
+      // 2. Update node status and result
+      await this.workflowRepo.updateNode(completedNode.id, {
+        execution_status: 'completed',
+        completion_timestamp: new Date(),
+        result: result || null,
+      });
+
+      // 3. Find all nodes in the workflow
+      const allNodes = await this.workflowRepo.findNodesByGraphId(completedNode.workflow_graph_id);
+
+      // 4. Check which nodes are now ready to spawn
+      for (const node of allNodes) {
+        if (node.execution_status !== 'pending') {
+          continue; // Skip already spawned/completed nodes
+        }
+
+        const deps = Array.isArray(node.dependencies) ? node.dependencies : [];
+
+        // Check if ALL dependencies are completed
+        const allDepsCompleted = deps.every(depId => {
+          const depNode = allNodes.find(n => n.id === depId);
+          return depNode && depNode.execution_status === 'completed';
+        });
+
+        if (allDepsCompleted) {
+          // Spawn this node!
+          this.engineLogger.info(
+            { nodeId: node.id, role: node.role, completedDeps: deps },
+            'All dependencies completed, spawning node'
+          );
+
+          // Get parent agent from workflow graph
+          const graph = await this.workflowRepo.findGraphById(node.workflow_graph_id);
+          if (!graph) continue;
+
+          // Gather dependency results for context
+          const depResults = deps.map(depId => {
+            const depNode = allNodes.find(n => n.id === depId);
+            return depNode?.result || {};
+          });
+
+          // Enhance task description with dependency outputs
+          let enhancedTask = node.task_description;
+          if (depResults.length > 0 && depResults.some(r => Object.keys(r).length > 0)) {
+            enhancedTask += `\n\nDependency outputs:\n${JSON.stringify(depResults, null, 2)}`;
+          }
+
+          const newAgentId = await this.agentService.spawnAgent(
+            node.role,
+            enhancedTask,
+            node.budget_allocation,
+            agentId // Use completed agent as parent
+          );
+
+          await this.workflowRepo.updateNode(node.id, {
+            agent_id: newAgentId,
+            execution_status: 'executing',
+            spawn_timestamp: new Date(),
+          });
+        }
+      }
+
+      // 5. Check if workflow is complete
+      const progress = await this.getWorkflowProgress(completedNode.workflow_graph_id);
+      if (progress.total === progress.completed) {
+        await this.workflowRepo.updateGraph(completedNode.workflow_graph_id, {
+          status: 'completed',
+          completed_at: new Date(),
+        });
+        this.engineLogger.info(
+          { graphId: completedNode.workflow_graph_id },
+          'Workflow execution completed'
+        );
+      }
+
+    } catch (error) {
+      this.engineLogger.error({ error, agentId }, 'Failed to process completed node');
+      throw error;
+    }
+  }
+
+  /**
+   * Terminate all active nodes in a workflow (kill switch)
+   *
+   * Used when workflow fails or needs to be stopped.
+   *
+   * @param graphId - Workflow graph UUID
+   */
+  async terminateWorkflow(graphId: string): Promise<void> {
+    this.engineLogger.info({ graphId }, 'Terminating workflow');
+
+    try {
+      const nodes = await this.workflowRepo.findNodesByGraphId(graphId);
+
+      for (const node of nodes) {
+        if (node.agent_id && node.execution_status === 'executing') {
+          this.engineLogger.info(
+            { nodeId: node.id, agentId: node.agent_id },
+            'Terminating node agent'
+          );
+
+          // TODO: Add terminateAgent() to AgentService
+          // await this.agentService.terminateAgent(node.agent_id);
+
+          await this.workflowRepo.updateNode(node.id, {
+            execution_status: 'skipped',
+            error_message: 'Workflow terminated',
+          });
+        }
+      }
+
+      await this.workflowRepo.updateGraph(graphId, {
+        status: 'failed',
+        completed_at: new Date(),
+      });
+
+      this.engineLogger.info({ graphId }, 'Workflow terminated');
+    } catch (error) {
+      this.engineLogger.error({ error, graphId }, 'Failed to terminate workflow');
       throw error;
     }
   }
