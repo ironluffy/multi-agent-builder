@@ -283,11 +283,10 @@ export class AgentService {
 
       await db.query(
         `UPDATE budgets
-         SET tokens_used = tokens_used + $1,
-             estimated_cost = estimated_cost + $2,
-             updated_at = $3
-         WHERE agent_id = $4`,
-        [tokensUsed, cost, now, agentId]
+         SET used = used + $1,
+             updated_at = $2
+         WHERE agent_id = $3`,
+        [tokensUsed, now, agentId]
       );
 
       logger.debug({ agentId, tokensUsed, cost }, 'Token usage updated');
@@ -362,12 +361,12 @@ export class AgentService {
       const totalAgents = parseInt(totalResult.rows[0].count, 10);
 
       // Get budget totals
-      const budgetResult = await db.query<{ tokens_used: string; estimated_cost: string }>(
-        'SELECT SUM(tokens_used) as tokens_used, SUM(estimated_cost) as estimated_cost FROM budgets'
+      const budgetResult = await db.query<{ total_used: string }>(
+        'SELECT SUM(used) as total_used FROM budgets'
       );
 
-      const totalTokensUsed = parseInt(budgetResult.rows[0]?.tokens_used || '0', 10);
-      const totalEstimatedCost = parseFloat(budgetResult.rows[0]?.estimated_cost || '0');
+      const totalTokensUsed = parseInt(budgetResult.rows[0]?.total_used || '0', 10);
+      const totalEstimatedCost = totalTokensUsed * 0.000003; // Estimated cost per token
 
       return {
         totalAgents,

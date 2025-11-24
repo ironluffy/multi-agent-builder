@@ -355,7 +355,7 @@ export class BudgetService {
     try {
       const result = await db.transaction(async (client) => {
         // 1. Get child's budget
-        const childBudgetResult = await client.query<Budget>(
+        const childBudgetResult = await client.query<Budget & { reclaimed: boolean }>(
           'SELECT * FROM budgets WHERE agent_id = $1 FOR UPDATE',
           [child_id]
         );
@@ -365,6 +365,11 @@ export class BudgetService {
         }
 
         const childBudget = childBudgetResult.rows[0];
+
+        // Check if budget was already reclaimed
+        if (childBudget.reclaimed) {
+          throw new Error(`Budget for agent ${child_id} was already reclaimed`);
+        }
 
         // 2. Get child's parent from agents table
         const parentResult = await client.query<{ parent_id: string | null }>(
@@ -415,6 +420,18 @@ export class BudgetService {
 
         const updatedParent = parentUpdateResult.rows[0];
 
+        // 5. Mark child budget as reclaimed to prevent double reclamation
+        const updatedChildResult = await client.query<Budget>(
+          `UPDATE budgets
+           SET reclaimed = TRUE,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE agent_id = $1
+           RETURNING *`,
+          [child_id]
+        );
+
+        const updatedChild = updatedChildResult.rows[0];
+
         this.serviceLogger.info(
           {
             child_id,
@@ -429,7 +446,7 @@ export class BudgetService {
 
         return {
           parent: updatedParent,
-          child: childBudget,
+          child: updatedChild,
         };
       });
 

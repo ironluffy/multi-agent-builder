@@ -95,7 +95,7 @@ export class MessageRepository {
     const query = `
       SELECT * FROM messages
       WHERE recipient_id = $1 AND status = 'pending'
-      ORDER BY priority DESC, created_at ASC
+      ORDER BY priority DESC, created_at ASC, id ASC
       LIMIT $2
     `;
 
