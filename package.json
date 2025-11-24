@@ -32,6 +32,7 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.1.50",
     "@anthropic-ai/sdk": "^0.30.1",
     "dotenv": "^17.2.3",
     "pg": "^8.11.3",
