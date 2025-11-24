@@ -217,6 +217,22 @@ export class WorkflowRepository {
       updates.push(`agent_id = $${paramIndex++}`);
       values.push(data.agent_id);
     }
+    if (data.role !== undefined) {
+      updates.push(`role = $${paramIndex++}`);
+      values.push(data.role);
+    }
+    if (data.task_description !== undefined) {
+      updates.push(`task_description = $${paramIndex++}`);
+      values.push(data.task_description);
+    }
+    if (data.budget_allocation !== undefined) {
+      updates.push(`budget_allocation = $${paramIndex++}`);
+      values.push(data.budget_allocation);
+    }
+    if (data.dependencies !== undefined) {
+      updates.push(`dependencies = $${paramIndex++}`);
+      values.push(JSON.stringify(data.dependencies));
+    }
     if (data.execution_status !== undefined) {
       updates.push(`execution_status = $${paramIndex++}`);
       values.push(data.execution_status);
@@ -236,6 +252,14 @@ export class WorkflowRepository {
     if (data.error_message !== undefined) {
       updates.push(`error_message = $${paramIndex++}`);
       values.push(data.error_message);
+    }
+    if (data.position !== undefined) {
+      updates.push(`position = $${paramIndex++}`);
+      values.push(data.position);
+    }
+    if (data.metadata !== undefined) {
+      updates.push(`metadata = $${paramIndex++}`);
+      values.push(data.metadata ? JSON.stringify(data.metadata) : null);
     }
 
     if (updates.length === 0) {

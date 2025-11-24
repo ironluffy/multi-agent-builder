@@ -315,9 +315,7 @@ export class WorkflowEngine {
 
     try {
       // 1. Find the workflow node for this agent
-      const nodes = await this.workflowRepo.findNodesByGraphId(''); // Need to query by agent_id
-      // TODO: Add findNodeByAgentId() to repository
-      const completedNode = nodes.find(n => n.agent_id === agentId);
+      const completedNode = await this.workflowRepo.findNodeByAgentId(agentId);
 
       if (!completedNode) {
         this.engineLogger.warn({ agentId }, 'No workflow node found for agent');
