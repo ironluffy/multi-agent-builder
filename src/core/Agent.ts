@@ -1,8 +1,8 @@
 import { AgentCore } from './AgentCore.js';
 import { AgentRepository } from '../database/repositories/AgentRepository.js';
-import { HierarchyRepository } from '../database/repositories/HierarchyRepository.js';
 import { BudgetService } from '../services/BudgetService.js';
 import { AgentService } from '../services/AgentService.js';
+import { HierarchyService } from '../services/HierarchyService.js';
 import { config } from '../config/env.js';
 import { logger } from '../utils/Logger.js';
 import type {
@@ -455,26 +455,13 @@ export class Agent {
 
       spawnLogger.info({ childId, childDepth }, 'Child agent created');
 
-      // 4. Validate no cycles before creating hierarchy relationship
+      // 4. Create hierarchy relationship with validation (includes cycle detection)
       const hierarchyService = new HierarchyService();
-      const wouldCreateCycle = await hierarchyService.detectCycle(this.id, childId);
-
-      if (wouldCreateCycle) {
-        throw new Error(
-          `Cannot create hierarchy relationship: would create a cycle. ` +
-          `Parent: ${this.id}, Child: ${childId}`
-        );
-      }
-
-      spawnLogger.debug({ parentId: this.id, childId }, 'Cycle detection passed');
-
-      // 5. Create hierarchy relationship
-      const hierarchyRepo = new HierarchyRepository();
-      await hierarchyRepo.create(this.id, childId);
+      await hierarchyService.createRelationship(this.id, childId);
 
       spawnLogger.info({ childId }, 'Hierarchy relationship created');
 
-      // 6. Delegate budget from parent (reserve tokens in parent's budget)
+      // 5. Delegate budget from parent (reserve tokens in parent's budget)
       // Note: The budget triggers in the database handle budget reclamation
       // For now, we just log the delegation. In production, you might want to
       // reserve these tokens in the parent's budget using BudgetRepository.reserve()
@@ -487,7 +474,7 @@ export class Agent {
         'Budget delegated to subordinate'
       );
 
-      // 7. Update parent's updated_at timestamp to reflect the spawn
+      // 6. Update parent's updated_at timestamp to reflect the spawn
       // Note: Parent-child relationship is tracked in the hierarchies table
       // If metadata tracking is needed in the future, add a JSONB metadata column
       // to the agents table and update the Agent model schema
