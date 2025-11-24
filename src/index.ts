@@ -2,11 +2,15 @@ import { config, validateConfig } from './config/env.js';
 import { logger } from './utils/Logger.js';
 import { db } from './infrastructure/SharedDatabase.js';
 import { InteractiveCLI } from './cli/InteractiveCLI.js';
+import { WorkflowPoller } from './services/WorkflowPoller.js';
 
 /**
  * Multi-Agent Orchestration System
  * Entry point for the application
  */
+
+// Global workflow poller instance
+let workflowPoller: WorkflowPoller | null = null;
 
 async function main() {
   try {
@@ -20,6 +24,11 @@ async function main() {
     // Initialize database connection
     await db.initialize();
     logger.info('✓ Database connection established');
+
+    // Start workflow poller for event-driven workflow execution
+    workflowPoller = new WorkflowPoller(5000); // Poll every 5 seconds
+    await workflowPoller.start();
+    logger.info('✓ Workflow poller started');
 
     // Start interactive CLI
     if (config.interactive.enabled) {
@@ -50,12 +59,20 @@ process.on('uncaughtException', (error) => {
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   logger.info('SIGTERM received, shutting down gracefully');
+  if (workflowPoller) {
+    await workflowPoller.stop();
+    logger.info('✓ Workflow poller stopped');
+  }
   await db.shutdown();
   process.exit(0);
 });
 
 process.on('SIGINT', async () => {
   logger.info('SIGINT received, shutting down gracefully');
+  if (workflowPoller) {
+    await workflowPoller.stop();
+    logger.info('✓ Workflow poller stopped');
+  }
   await db.shutdown();
   process.exit(0);
 });
