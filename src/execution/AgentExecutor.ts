@@ -10,6 +10,7 @@ import { query, type Query, type SDKMessage, type Options } from '@anthropic-ai/
 import type { Agent } from '../models/Agent.js';
 import { AgentRepository } from '../database/repositories/AgentRepository.js';
 import { WorkspaceRepository } from '../database/repositories/WorkspaceRepository.js';
+import { AgentTracer } from '../monitoring/AgentTracer.js';
 import { logger } from '../utils/Logger.js';
 
 export interface AgentResult {
@@ -67,10 +68,27 @@ export class AgentExecutor {
 
       this.executionLogger.debug({ agentId, workspacePath, options }, 'Executing with options');
 
-      // 4. Execute using Claude Agent SDK
-      const result = await this.runQuery(agent, options);
+      // 4. Execute using Claude Agent SDK with tracing
+      const tracer = new AgentTracer(agentId);
+      await tracer.logEvent({
+        eventType: 'execution_started',
+        message: `Agent execution started: ${agent.role}`,
+        data: { role: agent.role, task: agent.task_description },
+      });
+
+      const result = await this.runQuery(agent, options, tracer);
 
       const durationMs = Date.now() - startTime;
+
+      // Log completion event
+      await tracer.logEvent({
+        eventType: result.success ? 'completed' : 'failed',
+        message: result.success
+          ? `Agent execution completed successfully`
+          : `Agent execution failed: ${result.error}`,
+        data: { tokensUsed: result.tokensUsed, costUsd: result.costUsd, durationMs },
+      });
+
       this.executionLogger.info(
         { agentId, success: result.success, durationMs },
         'Agent execution completed'
@@ -100,7 +118,7 @@ export class AgentExecutor {
   /**
    * Run the Claude Agent SDK query and collect results
    */
-  private async runQuery(agent: Agent, options: Options): Promise<Omit<AgentResult, 'durationMs'>> {
+  private async runQuery(agent: Agent, options: Options, tracer: AgentTracer): Promise<Omit<AgentResult, 'durationMs'>> {
     const agentQuery: Query = query({
       prompt: agent.task_description,
       options,
@@ -117,11 +135,39 @@ export class AgentExecutor {
           'Received SDK message'
         );
 
+        // Log every SDK message as a trace
+        const content = tracer.extractContent(message);
+        const tokens =
+          message.type === 'result' && 'usage' in message
+            ? { input: message.usage.input_tokens, output: message.usage.output_tokens }
+            : undefined;
+        await tracer.logTrace(message.type, content, message, tokens);
+
         // Collect assistant responses
         if (message.type === 'assistant') {
           const text = this.extractTextFromAssistant(message);
           if (text) {
             output += text + '\n';
+          }
+
+          // Extract and log thinking/reasoning
+          const thinking = tracer.extractThinking(message);
+          if (thinking) {
+            await tracer.logDecision({
+              decisionType: 'reasoning',
+              reasoning: thinking,
+            });
+          }
+
+          // Extract and log tool usage
+          const toolUse = tracer.extractToolUse(message);
+          if (toolUse) {
+            // Note: We can't intercept tool execution here, but we log the intent
+            await tracer.logEvent({
+              eventType: 'tool_use',
+              message: `Tool requested: ${toolUse.name}`,
+              data: { toolName: toolUse.name, input: toolUse.input },
+            });
           }
         }
 

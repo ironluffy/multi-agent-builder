@@ -20,7 +20,10 @@
     "test:reset": "tsx tests/setup/test-db-setup.ts reset",
     "lint": "eslint src/",
     "typecheck": "tsc --noEmit",
-    "migrate": "node dist/database/migrate.js"
+    "migrate": "node dist/database/migrate.js",
+    "monitor:cli": "tsx src/cli/MonitorCLI.ts",
+    "monitor:server": "tsx src/monitoring/MonitoringServer.ts",
+    "demo": "tsx demo/simple-spawn-test.ts"
   },
   "keywords": [
     "multi-agent",
