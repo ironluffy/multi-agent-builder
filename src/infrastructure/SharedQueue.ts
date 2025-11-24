@@ -41,16 +41,18 @@ export class SharedQueue {
    * @param to - Recipient agent ID
    * @param payload - Message payload (any JSON-serializable object)
    * @param priority - Message priority (higher = more urgent, default: 0)
+   * @param threadId - Optional thread ID to group messages
    * @returns Created message
    */
   async send(
     from: string,
     to: string,
     payload: MessagePayload,
-    priority: number = 0
+    priority: number = 0,
+    threadId?: string
   ): Promise<Message> {
     try {
-      const message = await this.messageRepo.create(from, to, payload, priority);
+      const message = await this.messageRepo.create(from, to, payload, priority, threadId);
 
       this.queueLogger.debug(
         {
@@ -58,6 +60,7 @@ export class SharedQueue {
           from,
           to,
           priority,
+          thread_id: threadId,
         },
         'Message sent to queue'
       );
@@ -65,7 +68,7 @@ export class SharedQueue {
       return message;
     } catch (error) {
       this.queueLogger.error(
-        { error, from, to, priority },
+        { error, from, to, priority, thread_id: threadId },
         'Failed to send message'
       );
       throw error;
@@ -325,17 +328,19 @@ export class SharedQueue {
    * @param toList - Array of recipient agent IDs
    * @param payload - Message payload
    * @param priority - Message priority (default: 0)
+   * @param threadId - Optional thread ID to group messages
    * @returns Array of created messages
    */
   async broadcast(
     from: string,
     toList: string[],
     payload: MessagePayload,
-    priority: number = 0
+    priority: number = 0,
+    threadId?: string
   ): Promise<Message[]> {
     try {
       const messages = await Promise.all(
-        toList.map(to => this.messageRepo.create(from, to, payload, priority))
+        toList.map(to => this.messageRepo.create(from, to, payload, priority, threadId))
       );
 
       this.queueLogger.info(
@@ -343,6 +348,7 @@ export class SharedQueue {
           from,
           recipientCount: toList.length,
           priority,
+          thread_id: threadId,
         },
         'Broadcast message sent'
       );
@@ -350,7 +356,7 @@ export class SharedQueue {
       return messages;
     } catch (error) {
       this.queueLogger.error(
-        { error, from, recipientCount: toList.length },
+        { error, from, recipientCount: toList.length, thread_id: threadId },
         'Failed to broadcast message'
       );
       throw error;
