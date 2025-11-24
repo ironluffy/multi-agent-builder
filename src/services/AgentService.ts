@@ -35,12 +35,17 @@ export class AgentService {
     tokenLimit: number = 100000,
     parentId?: string
   ): Promise<string> {
+    // Validate token limit
+    if (tokenLimit <= 0) {
+      throw new Error('Token limit must be greater than 0');
+    }
+
     const agentId = uuidv4();
     const now = new Date();
 
     try {
       await db.transaction(async (client) => {
-        // Determine depth level
+        // Determine depth level and validate parent budget if spawning child
         let depthLevel = 0;
         if (parentId) {
           const parentResult = await client.query<Agent>(
@@ -50,6 +55,38 @@ export class AgentService {
           if (parentResult.rows.length > 0) {
             depthLevel = parentResult.rows[0].depth_level + 1;
           }
+
+          // Validate parent has sufficient budget before spawning child
+          const parentBudgetResult = await client.query<Budget>(
+            'SELECT allocated, used, reserved FROM budgets WHERE agent_id = $1',
+            [parentId]
+          );
+
+          if (parentBudgetResult.rows.length === 0) {
+            throw new Error(
+              `Cannot spawn child agent: parent ${parentId} has no budget record`
+            );
+          }
+
+          const parentBudget = parentBudgetResult.rows[0];
+          const availableParentBudget =
+            parentBudget.allocated - parentBudget.used - parentBudget.reserved;
+
+          if (availableParentBudget < tokenLimit) {
+            throw new Error(
+              `Cannot spawn child agent: parent ${parentId} has insufficient budget. ` +
+              `Available: ${availableParentBudget}, Required: ${tokenLimit}`
+            );
+          }
+
+          logger.debug(
+            {
+              parent_id: parentId,
+              available_budget: availableParentBudget,
+              requested: tokenLimit,
+            },
+            'Parent budget validation passed'
+          );
         }
 
         // Create agent

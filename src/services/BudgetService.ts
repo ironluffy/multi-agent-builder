@@ -134,7 +134,13 @@ export class BudgetService {
    */
   async getBudget(agent_id: string): Promise<Budget | null> {
     try {
-      return await this.budgetRepo.getByAgentId(agent_id);
+      const budget = await this.budgetRepo.getByAgentId(agent_id);
+
+      if (!budget) {
+        throw new Error(`No budget found for agent ${agent_id}`);
+      }
+
+      return budget;
     } catch (error) {
       this.serviceLogger.error(
         { error, agent_id },
@@ -323,6 +329,115 @@ export class BudgetService {
       this.serviceLogger.error(
         { error, parent_id, child_id, tokens },
         'Failed to allocate budget from parent'
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Reclaim unused budget from child agent back to parent
+   *
+   * This method is typically called when a child agent completes its task.
+   * It returns unused tokens (allocated - used) from the child back to the parent's
+   * available budget by reducing the parent's reserved amount.
+   *
+   * Note: The database trigger 'reclaim_child_budget' automatically handles
+   * reclamation on agent status changes. This method provides explicit control
+   * for manual reclamation scenarios.
+   *
+   * @param child_id - Child agent UUID
+   * @returns Object with updated parent and child budget states
+   * @throws Error if child has no parent or reclamation fails
+   */
+  async reclaimBudget(child_id: string): Promise<{ parent: Budget; child: Budget }> {
+    this.serviceLogger.info({ child_id }, 'Reclaiming budget from child to parent');
+
+    try {
+      const result = await db.transaction(async (client) => {
+        // 1. Get child's budget
+        const childBudgetResult = await client.query<Budget>(
+          'SELECT * FROM budgets WHERE agent_id = $1 FOR UPDATE',
+          [child_id]
+        );
+
+        if (childBudgetResult.rows.length === 0) {
+          throw new Error(`Child agent ${child_id} has no budget record`);
+        }
+
+        const childBudget = childBudgetResult.rows[0];
+
+        // 2. Get child's parent from agents table
+        const parentResult = await client.query<{ parent_id: string | null }>(
+          'SELECT parent_id FROM agents WHERE id = $1',
+          [child_id]
+        );
+
+        if (parentResult.rows.length === 0) {
+          throw new Error(`Child agent ${child_id} not found`);
+        }
+
+        const parentId = parentResult.rows[0].parent_id;
+
+        if (!parentId) {
+          throw new Error(`Child agent ${child_id} has no parent`);
+        }
+
+        // 3. Calculate unused budget
+        const unusedBudget = childBudget.allocated - childBudget.used;
+
+        this.serviceLogger.debug(
+          {
+            child_id,
+            parent_id: parentId,
+            child_allocated: childBudget.allocated,
+            child_used: childBudget.used,
+            unused: unusedBudget,
+          },
+          'Calculated unused budget for reclamation'
+        );
+
+        // 4. Update parent's reserved budget (reduce by unused amount)
+        // reserved was increased by child.allocated during allocation
+        // now we reduce it by unused amount: reserved -= (allocated - used)
+        // which effectively means: reserved -= allocated; reserved += used
+        const parentUpdateResult = await client.query<Budget>(
+          `UPDATE budgets
+           SET reserved = reserved - $2,
+               updated_at = CURRENT_TIMESTAMP
+           WHERE agent_id = $1
+           RETURNING *`,
+          [parentId, unusedBudget]
+        );
+
+        if (parentUpdateResult.rows.length === 0) {
+          throw new Error(`Parent agent ${parentId} has no budget record`);
+        }
+
+        const updatedParent = parentUpdateResult.rows[0];
+
+        this.serviceLogger.info(
+          {
+            child_id,
+            parent_id: parentId,
+            reclaimed: unusedBudget,
+            parent_reserved_before: updatedParent.reserved + unusedBudget,
+            parent_reserved_after: updatedParent.reserved,
+            parent_available_after: updatedParent.allocated - updatedParent.used - updatedParent.reserved,
+          },
+          'Budget successfully reclaimed from child to parent'
+        );
+
+        return {
+          parent: updatedParent,
+          child: childBudget,
+        };
+      });
+
+      return result;
+    } catch (error) {
+      this.serviceLogger.error(
+        { error, child_id },
+        'Failed to reclaim budget from child'
       );
       throw error;
     }

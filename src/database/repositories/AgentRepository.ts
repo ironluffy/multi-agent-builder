@@ -170,10 +170,10 @@ export class AgentRepository {
       if (data.updated_at !== undefined) {
         updates.push(`updated_at = $${paramIndex++}`);
         values.push(data.updated_at);
+      } else {
+        // Only add CURRENT_TIMESTAMP if updated_at not explicitly provided
+        updates.push(`updated_at = CURRENT_TIMESTAMP`);
       }
-
-      // Always update updated_at
-      updates.push(`updated_at = CURRENT_TIMESTAMP`);
 
       if (updates.length === 0) {
         // No fields to update, just return current state

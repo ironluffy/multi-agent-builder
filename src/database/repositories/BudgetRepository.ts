@@ -127,6 +127,79 @@ export class BudgetRepository {
   }
 
   /**
+   * Get budget hierarchy for entire agent tree
+   *
+   * Uses recursive CTE to traverse the agent hierarchy and fetch budget
+   * information for each agent in the tree.
+   *
+   * @param root_agent_id - Root agent UUID to start hierarchy from
+   * @param options - Optional configuration (maxDepth to limit recursion depth)
+   * @returns Array of budgets with hierarchy information (depth_level, parent_id)
+   */
+  async getBudgetHierarchy(
+    root_agent_id: string,
+    options?: { maxDepth?: number }
+  ): Promise<Array<Budget & { depth_level: number; parent_id: string | null }>> {
+    const maxDepth = options?.maxDepth ?? 10;
+
+    const query = `
+      WITH RECURSIVE budget_tree AS (
+        -- Base case: root agent
+        SELECT
+          b.*,
+          a.depth_level,
+          a.parent_id,
+          0 AS recursion_depth
+        FROM budgets b
+        JOIN agents a ON b.agent_id = a.id
+        WHERE a.id = $1
+
+        UNION ALL
+
+        -- Recursive case: children
+        SELECT
+          b.*,
+          a.depth_level,
+          a.parent_id,
+          bt.recursion_depth + 1
+        FROM budgets b
+        JOIN agents a ON b.agent_id = a.id
+        JOIN budget_tree bt ON a.parent_id = bt.agent_id
+        WHERE bt.recursion_depth < $2
+      )
+      SELECT
+        id,
+        agent_id,
+        allocated,
+        used,
+        reserved,
+        created_at,
+        updated_at,
+        depth_level,
+        parent_id
+      FROM budget_tree
+      ORDER BY depth_level ASC, created_at ASC
+    `;
+
+    try {
+      const result = await pool.query<Budget & { depth_level: number; parent_id: string | null }>(
+        query,
+        [root_agent_id, maxDepth]
+      );
+
+      logger.debug(
+        { root_agent_id, count: result.rows.length },
+        'Retrieved budget hierarchy'
+      );
+
+      return result.rows;
+    } catch (error) {
+      logger.error({ error, root_agent_id }, 'Failed to get budget hierarchy');
+      throw error;
+    }
+  }
+
+  /**
    * Delete budget record (usually when agent is deleted)
    */
   async delete(agent_id: string): Promise<void> {
