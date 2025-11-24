@@ -1,6 +1,8 @@
 import { v4 as uuidv4 } from 'uuid';
 import { db } from '../infrastructure/SharedDatabase.js';
 import { logger } from '../utils/Logger.js';
+import { GitWorktree } from '../infrastructure/GitWorktree.js';
+import { WorkspaceRepository } from '../database/repositories/WorkspaceRepository.js';
 import type { Agent, AgentStatusType } from '../models/Agent.js';
 import type { Budget } from '../models/Budget.js';
 import type { Message } from '../models/Message.js';
@@ -10,6 +12,14 @@ import type { Message } from '../models/Message.js';
  * Handles agent lifecycle management, communication, and status tracking
  */
 export class AgentService {
+  private gitWorktree: GitWorktree;
+  private workspaceRepo: WorkspaceRepository;
+
+  constructor() {
+    this.gitWorktree = new GitWorktree();
+    this.workspaceRepo = new WorkspaceRepository();
+  }
+
   /**
    * Spawn a new agent with the given role and task
    *
@@ -59,6 +69,32 @@ export class AgentService {
 
         logger.info({ agentId, role, parentId, depthLevel }, 'Agent spawned successfully');
       });
+
+      // Create isolated workspace for agent (outside transaction)
+      try {
+        const worktreeInfo = await this.gitWorktree.createWorktree(agentId);
+        await this.workspaceRepo.create(
+          agentId,
+          worktreeInfo.path,
+          worktreeInfo.branch
+        );
+
+        logger.info(
+          {
+            agentId,
+            worktree_path: worktreeInfo.path,
+            branch: worktreeInfo.branch,
+          },
+          'Workspace created for agent'
+        );
+      } catch (workspaceError) {
+        logger.warn(
+          { error: workspaceError, agentId },
+          'Failed to create workspace, agent will run without isolated workspace'
+        );
+        // Don't fail agent spawn if workspace creation fails
+        // Agent can still operate without isolated workspace
+      }
 
       return agentId;
     } catch (error) {

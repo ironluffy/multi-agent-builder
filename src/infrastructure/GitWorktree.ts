@@ -365,4 +365,104 @@ export class GitWorktree {
       throw error;
     }
   }
+
+  /**
+   * Get workspace diff for an agent
+   * Shows changes in the agent's worktree compared to HEAD
+   *
+   * @param agentId - Agent UUID
+   * @param options - Diff options
+   * @returns Git diff output
+   */
+  async getWorkspaceDiff(
+    agentId: string,
+    options?: {
+      cached?: boolean;
+      nameOnly?: boolean;
+      stat?: boolean;
+    }
+  ): Promise<string> {
+    const worktreePath = path.join(this.baseWorktreePath, agentId);
+
+    try {
+      // Check if worktree exists
+      const exists = await this.worktreeExists(worktreePath);
+      if (!exists) {
+        throw new Error(`Worktree for agent ${agentId} does not exist`);
+      }
+
+      // Build git diff command
+      let command = 'git diff';
+
+      if (options?.cached) {
+        command += ' --cached';
+      }
+
+      if (options?.nameOnly) {
+        command += ' --name-only';
+      }
+
+      if (options?.stat) {
+        command += ' --stat';
+      }
+
+      this.worktreeLogger.debug(
+        { agent_id: agentId, command },
+        'Getting workspace diff'
+      );
+
+      const { stdout } = await execAsync(command, {
+        cwd: worktreePath,
+      });
+
+      return stdout;
+    } catch (error) {
+      this.worktreeLogger.error(
+        { error, agent_id: agentId },
+        'Failed to get workspace diff'
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Check if worktree has uncommitted changes
+   *
+   * @param agentId - Agent UUID
+   * @returns True if there are uncommitted changes
+   */
+  async hasUncommittedChanges(agentId: string): Promise<boolean> {
+    try {
+      const diff = await this.getWorkspaceDiff(agentId);
+      return diff.trim().length > 0;
+    } catch (error) {
+      this.worktreeLogger.error(
+        { error, agent_id: agentId },
+        'Failed to check for uncommitted changes'
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Get list of changed files in worktree
+   *
+   * @param agentId - Agent UUID
+   * @returns Array of changed file paths
+   */
+  async getChangedFiles(agentId: string): Promise<string[]> {
+    try {
+      const diff = await this.getWorkspaceDiff(agentId, { nameOnly: true });
+      return diff
+        .trim()
+        .split('\n')
+        .filter(line => line.length > 0);
+    } catch (error) {
+      this.worktreeLogger.error(
+        { error, agent_id: agentId },
+        'Failed to get changed files'
+      );
+      throw error;
+    }
+  }
 }
