@@ -3,16 +3,14 @@ import { logger } from './utils/Logger.js';
 import { db } from './infrastructure/SharedDatabase.js';
 import { InteractiveCLI } from './cli/InteractiveCLI.js';
 import { WorkflowPoller } from './services/WorkflowPoller.js';
-import { AgentExecutionWorker } from './services/AgentExecutionWorker.js';
 
 /**
  * Multi-Agent Orchestration System
  * Entry point for the application
  */
 
-// Global instances
+// Global workflow poller instance
 let workflowPoller: WorkflowPoller | null = null;
-let agentExecutionWorker: AgentExecutionWorker | null = null;
 
 async function main() {
   try {
@@ -31,11 +29,6 @@ async function main() {
     workflowPoller = new WorkflowPoller(5000); // Poll every 5 seconds
     await workflowPoller.start();
     logger.info('✓ Workflow poller started');
-
-    // Start agent execution worker for autonomous agent execution
-    agentExecutionWorker = new AgentExecutionWorker(5000); // Poll every 5 seconds
-    await agentExecutionWorker.start();
-    logger.info('✓ Agent execution worker started');
 
     // Start interactive CLI
     if (config.interactive.enabled) {
@@ -66,10 +59,6 @@ process.on('uncaughtException', (error) => {
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   logger.info('SIGTERM received, shutting down gracefully');
-  if (agentExecutionWorker) {
-    await agentExecutionWorker.stop();
-    logger.info('✓ Agent execution worker stopped');
-  }
   if (workflowPoller) {
     await workflowPoller.stop();
     logger.info('✓ Workflow poller stopped');
@@ -80,10 +69,6 @@ process.on('SIGTERM', async () => {
 
 process.on('SIGINT', async () => {
   logger.info('SIGINT received, shutting down gracefully');
-  if (agentExecutionWorker) {
-    await agentExecutionWorker.stop();
-    logger.info('✓ Agent execution worker stopped');
-  }
   if (workflowPoller) {
     await workflowPoller.stop();
     logger.info('✓ Workflow poller stopped');

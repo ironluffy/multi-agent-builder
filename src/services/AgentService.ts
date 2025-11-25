@@ -3,8 +3,7 @@ import { db } from '../infrastructure/SharedDatabase.js';
 import { logger } from '../utils/Logger.js';
 import { GitWorktree } from '../infrastructure/GitWorktree.js';
 import { WorkspaceRepository } from '../database/repositories/WorkspaceRepository.js';
-import { AgentExecutor } from '../execution/AgentExecutor.js';
-import { WorkflowEngine } from '../core/WorkflowEngine.js';
+import { LinearSyncService } from '../integrations/LinearSyncService.js';
 import type { Agent, AgentStatusType } from '../models/Agent.js';
 import type { Budget } from '../models/Budget.js';
 import type { Message } from '../models/Message.js';
@@ -16,21 +15,10 @@ import type { Message } from '../models/Message.js';
 export class AgentService {
   private gitWorktree: GitWorktree;
   private workspaceRepo: WorkspaceRepository;
-  private executor: AgentExecutor;
-  private workflowEngine?: WorkflowEngine;
 
   constructor() {
     this.gitWorktree = new GitWorktree();
     this.workspaceRepo = new WorkspaceRepository();
-    this.executor = new AgentExecutor();
-  }
-
-  /**
-   * Set workflow engine for post-execution notifications
-   * Must be called after construction to avoid circular dependency
-   */
-  setWorkflowEngine(engine: WorkflowEngine): void {
-    this.workflowEngine = engine;
   }
 
   /**
@@ -182,11 +170,26 @@ export class AgentService {
    *
    * @param agentId - The ID of the agent
    * @param status - The new status
+   * @param result - Optional result data (for completed agents)
+   * @param errorMessage - Optional error message (for failed agents)
    */
-  async updateAgentStatus(agentId: string, status: AgentStatusType): Promise<void> {
+  async updateAgentStatus(
+    agentId: string,
+    status: AgentStatusType,
+    result?: string,
+    errorMessage?: string
+  ): Promise<void> {
     try {
       const now = new Date();
       const completedAt = status === 'completed' || status === 'failed' || status === 'terminated' ? now : null;
+
+      // Get agent info for duration calculation
+      const agentResult = await db.query<{ created_at: Date; tokens_used: number }>(
+        'SELECT created_at, tokens_used FROM agents WHERE id = $1',
+        [agentId]
+      );
+      const agent = agentResult.rows[0];
+      const durationMs = agent ? now.getTime() - new Date(agent.created_at).getTime() : undefined;
 
       await db.query(
         'UPDATE agents SET status = $1, updated_at = $2, completed_at = $3 WHERE id = $4',
@@ -194,6 +197,21 @@ export class AgentService {
       );
 
       logger.info({ agentId, status }, 'Agent status updated');
+
+      // Trigger Linear sync on completion (non-blocking)
+      if (status === 'completed' || status === 'failed' || status === 'terminated') {
+        const linearSync = new LinearSyncService();
+        linearSync.handleAgentCompletion({
+          agentId,
+          status: status as 'completed' | 'failed' | 'terminated',
+          result,
+          tokensUsed: agent?.tokens_used,
+          durationMs,
+          errorMessage,
+        }).catch(err => {
+          logger.warn({ err, agentId }, 'Linear sync failed (non-blocking)');
+        });
+      }
     } catch (error) {
       logger.error({ error, agentId, status }, 'Failed to update agent status');
       throw error;
@@ -389,78 +407,6 @@ export class AgentService {
       };
     } catch (error) {
       logger.error({ error }, 'Failed to get system summary');
-      throw error;
-    }
-  }
-
-  /**
-   * Execute an agent's task using the AgentExecutor
-   * This method runs the agent, updates its status, and notifies the workflow engine
-   *
-   * @param agentId - The ID of the agent to execute
-   */
-  async runAgent(agentId: string): Promise<void> {
-    logger.info({ agentId }, 'Starting agent execution');
-
-    try {
-      // Update status to executing
-      await this.updateAgentStatus(agentId, 'executing');
-
-      // Execute the agent using AgentExecutor
-      const result = await this.executor.execute(agentId);
-
-      if (result.success) {
-        // Store result and mark completed
-        await db.query(
-          `UPDATE agents SET status = $1, result = $2, completed_at = $3, updated_at = $4
-           WHERE id = $5`,
-          ['completed', JSON.stringify({ output: result.output }), new Date(), new Date(), agentId]
-        );
-
-        // Update budget with tokens used
-        await db.query(
-          'UPDATE budgets SET used = used + $1, updated_at = $2 WHERE agent_id = $3',
-          [result.tokensUsed, new Date(), agentId]
-        );
-
-        logger.info(
-          {
-            agentId,
-            tokensUsed: result.tokensUsed,
-            costUsd: result.costUsd,
-            durationMs: result.durationMs,
-          },
-          'Agent execution completed successfully'
-        );
-
-        // Notify workflow engine if available
-        if (this.workflowEngine) {
-          await this.workflowEngine.processCompletedNode(agentId, { output: result.output });
-        }
-      } else {
-        // Mark as failed
-        await db.query(
-          `UPDATE agents SET status = $1, error_message = $2, completed_at = $3, updated_at = $4
-           WHERE id = $5`,
-          ['failed', result.error || 'Unknown error', new Date(), new Date(), agentId]
-        );
-
-        logger.error(
-          { agentId, error: result.error },
-          'Agent execution failed'
-        );
-      }
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-
-      // Mark agent as failed
-      await db.query(
-        `UPDATE agents SET status = $1, error_message = $2, completed_at = $3, updated_at = $4
-         WHERE id = $5`,
-        ['failed', errorMessage, new Date(), new Date(), agentId]
-      );
-
-      logger.error({ error, agentId }, 'Agent execution crashed');
       throw error;
     }
   }
