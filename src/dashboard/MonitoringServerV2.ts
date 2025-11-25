@@ -19,6 +19,7 @@ import { db } from '../infrastructure/SharedDatabase.js';
 import { logger } from '../utils/Logger.js';
 import { AgentRepository } from '../database/repositories/AgentRepository.js';
 import { WorkflowRepository } from '../database/repositories/WorkflowRepository.js';
+import { LinearWebhookService } from '../integrations/LinearWebhookService.js';
 
 // Types
 interface DashboardMetrics {
@@ -55,6 +56,7 @@ export class MonitoringServerV2 {
   private io: SocketServer;
   private serverLogger = logger.child({ component: 'MonitoringServerV2' });
   private agentRepo: AgentRepository;
+  private linearWebhookService: LinearWebhookService;
 
   private metricsInterval: NodeJS.Timeout | null = null;
   private pollingInterval: NodeJS.Timeout | null = null;
@@ -71,12 +73,69 @@ export class MonitoringServerV2 {
     });
 
     this.agentRepo = new AgentRepository();
+    this.linearWebhookService = new LinearWebhookService();
     // WorkflowRepository initialized for future workflow monitoring
     new WorkflowRepository();
 
+    this.setupWebhookRoutes(); // Must be BEFORE middleware (needs raw body)
     this.setupMiddleware();
     this.setupRoutes();
     this.setupWebSocket();
+  }
+
+  // ===========================================================================
+  // Webhook Routes (must be before JSON middleware)
+  // ===========================================================================
+
+  private setupWebhookRoutes(): void {
+    // Linear webhook endpoint - needs raw body for signature verification
+    this.app.post(
+      '/webhooks/linear/:webhookId',
+      express.raw({ type: 'application/json' }),
+      async (req: Request, res: Response) => {
+        try {
+          const webhookId = req.params.webhookId;
+          const signature = req.headers['linear-signature'] as string || '';
+          const rawBody = req.body.toString();
+          const headers: Record<string, string> = {};
+
+          // Copy relevant headers
+          for (const [key, value] of Object.entries(req.headers)) {
+            if (typeof value === 'string') {
+              headers[key] = value;
+            }
+          }
+
+          this.serverLogger.info({ webhookId, bodyLength: rawBody.length }, 'Received Linear webhook');
+
+          const result = await this.linearWebhookService.processWebhook(
+            webhookId,
+            signature,
+            rawBody,
+            headers
+          );
+
+          if (!result.processed) {
+            this.serverLogger.warn({ webhookId, actions: result.actions }, 'Webhook not processed');
+            res.status(400).json(result);
+            return;
+          }
+
+          // Broadcast webhook event to dashboard
+          this.io.to('dashboard').emit('webhook:linear', {
+            webhookId,
+            eventId: result.eventId,
+            actions: result.actions,
+            timestamp: new Date(),
+          });
+
+          res.json(result);
+        } catch (error) {
+          this.serverLogger.error({ error }, 'Failed to process Linear webhook');
+          res.status(500).json({ error: 'Internal server error' });
+        }
+      }
+    );
   }
 
   // ===========================================================================

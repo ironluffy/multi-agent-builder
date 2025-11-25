@@ -3,6 +3,7 @@ import { db } from '../infrastructure/SharedDatabase.js';
 import { logger } from '../utils/Logger.js';
 import { GitWorktree } from '../infrastructure/GitWorktree.js';
 import { WorkspaceRepository } from '../database/repositories/WorkspaceRepository.js';
+import { LinearSyncService } from '../integrations/LinearSyncService.js';
 import type { Agent, AgentStatusType } from '../models/Agent.js';
 import type { Budget } from '../models/Budget.js';
 import type { Message } from '../models/Message.js';
@@ -169,11 +170,26 @@ export class AgentService {
    *
    * @param agentId - The ID of the agent
    * @param status - The new status
+   * @param result - Optional result data (for completed agents)
+   * @param errorMessage - Optional error message (for failed agents)
    */
-  async updateAgentStatus(agentId: string, status: AgentStatusType): Promise<void> {
+  async updateAgentStatus(
+    agentId: string,
+    status: AgentStatusType,
+    result?: string,
+    errorMessage?: string
+  ): Promise<void> {
     try {
       const now = new Date();
       const completedAt = status === 'completed' || status === 'failed' || status === 'terminated' ? now : null;
+
+      // Get agent info for duration calculation
+      const agentResult = await db.query<{ created_at: Date; tokens_used: number }>(
+        'SELECT created_at, tokens_used FROM agents WHERE id = $1',
+        [agentId]
+      );
+      const agent = agentResult.rows[0];
+      const durationMs = agent ? now.getTime() - new Date(agent.created_at).getTime() : undefined;
 
       await db.query(
         'UPDATE agents SET status = $1, updated_at = $2, completed_at = $3 WHERE id = $4',
@@ -181,6 +197,21 @@ export class AgentService {
       );
 
       logger.info({ agentId, status }, 'Agent status updated');
+
+      // Trigger Linear sync on completion (non-blocking)
+      if (status === 'completed' || status === 'failed' || status === 'terminated') {
+        const linearSync = new LinearSyncService();
+        linearSync.handleAgentCompletion({
+          agentId,
+          status: status as 'completed' | 'failed' | 'terminated',
+          result,
+          tokensUsed: agent?.tokens_used,
+          durationMs,
+          errorMessage,
+        }).catch(err => {
+          logger.warn({ err, agentId }, 'Linear sync failed (non-blocking)');
+        });
+      }
     } catch (error) {
       logger.error({ error, agentId, status }, 'Failed to update agent status');
       throw error;
