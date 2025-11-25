@@ -10,7 +10,6 @@ import MetricCard from '../components/MetricCard';
 import AgentCard from '../components/AgentCard';
 import StatusBadge from '../components/StatusBadge';
 import { useMetrics, useAgents, useApprovals } from '../hooks/useApi';
-import type { AgentStatus } from '../types';
 
 export default function Dashboard() {
   const { data: metricsData } = useMetrics(3000);
@@ -27,16 +26,15 @@ export default function Dashboard() {
     a => a.status === 'pending'
   ) || [];
 
-  const metrics = metricsData || {
-    total_agents: 0,
-    active_agents: 0,
-    pending_approvals: 0,
-    total_workflows: 0,
-    active_workflows: 0,
-    total_tokens_used: 0,
-    total_budget_allocated: 0,
-    agents_by_status: {},
-    agents_by_control_state: {},
+  // Map API response (camelCase) to expected format
+  const metrics = {
+    activeAgents: metricsData?.activeAgents ?? 0,
+    activeWorkflows: metricsData?.activeWorkflows ?? 0,
+    pendingApprovals: metricsData?.pendingApprovals ?? 0,
+    totalTokensUsed: metricsData?.totalTokensUsed ?? 0,
+    completedAgents: metricsData?.completedAgents ?? 0,
+    failedAgents: metricsData?.failedAgents ?? 0,
+    pausedAgents: metricsData?.pausedAgents ?? 0,
   };
 
   return (
@@ -53,25 +51,25 @@ export default function Dashboard() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard
           title="Active Agents"
-          value={metrics.active_agents}
+          value={metrics.activeAgents}
           icon={<Bot className="w-6 h-6" />}
           color="blue"
         />
         <MetricCard
           title="Active Workflows"
-          value={metrics.active_workflows}
+          value={metrics.activeWorkflows}
           icon={<GitBranch className="w-6 h-6" />}
           color="purple"
         />
         <MetricCard
           title="Pending Approvals"
-          value={metrics.pending_approvals}
+          value={metrics.pendingApprovals}
           icon={<CheckCircle className="w-6 h-6" />}
-          color={metrics.pending_approvals > 0 ? 'yellow' : 'green'}
+          color={metrics.pendingApprovals > 0 ? 'yellow' : 'green'}
         />
         <MetricCard
           title="Tokens Used"
-          value={metrics.total_tokens_used.toLocaleString()}
+          value={metrics.totalTokensUsed.toLocaleString()}
           icon={<Coins className="w-6 h-6" />}
           color="green"
         />
@@ -86,13 +84,32 @@ export default function Dashboard() {
             Agent Status Breakdown
           </h2>
           <div className="space-y-3">
-            {Object.entries(metrics.agents_by_status || {}).map(([status, count]) => (
-              <div key={status} className="flex items-center justify-between">
-                <StatusBadge status={status as AgentStatus} />
-                <span className="text-sm font-medium text-gray-900">{String(count)}</span>
+            {metrics.activeAgents > 0 && (
+              <div className="flex items-center justify-between">
+                <StatusBadge status="executing" />
+                <span className="text-sm font-medium text-gray-900">{metrics.activeAgents}</span>
               </div>
-            ))}
-            {Object.keys(metrics.agents_by_status || {}).length === 0 && (
+            )}
+            {metrics.completedAgents > 0 && (
+              <div className="flex items-center justify-between">
+                <StatusBadge status="completed" />
+                <span className="text-sm font-medium text-gray-900">{metrics.completedAgents}</span>
+              </div>
+            )}
+            {metrics.failedAgents > 0 && (
+              <div className="flex items-center justify-between">
+                <StatusBadge status="failed" />
+                <span className="text-sm font-medium text-gray-900">{metrics.failedAgents}</span>
+              </div>
+            )}
+            {metrics.pausedAgents > 0 && (
+              <div className="flex items-center justify-between">
+                <StatusBadge status="paused" />
+                <span className="text-sm font-medium text-gray-900">{metrics.pausedAgents}</span>
+              </div>
+            )}
+            {metrics.activeAgents === 0 && metrics.completedAgents === 0 &&
+             metrics.failedAgents === 0 && metrics.pausedAgents === 0 && (
               <p className="text-sm text-gray-500">No agents yet</p>
             )}
           </div>
